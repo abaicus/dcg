@@ -1,0 +1,35 @@
+name: 🚀 Create Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Create plugin artifact
+        run: |
+          # Create a clean copy
+          mkdir dummy-content-generator
+          # Create list of files to exclude based on .distignore
+          if [ -f ".distignore" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              if [ ! -z "$line" ] && [[ ! $line =~ ^# ]]; then
+                EXCLUDE="$EXCLUDE --exclude='$line'"
+              fi
+            done < .distignore
+          fi
+          # Copy files using rsync with exclusions
+          eval "rsync -av --progress . dummy-content-generator/ $EXCLUDE --exclude=dummy-content-generator"
+          zip -r dummy-content-generator.zip dummy-content-generator
+
+      - name: 🎉 Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dummy-content-generator.zip
+          token: ${{ secrets.PAT_TOKEN }}

@@ -1,0 +1,80 @@
+name: 🔖 Version Bump
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  version-bump:
+    if: startsWith(github.event.head_commit.message, 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: 🔍 Get current version
+        id: current_version
+        run: |
+          VERSION=$(grep "Version:" dummy-content-generator.php | awk -F': ' '{print $2}' | tr -d ' ')
+          echo "Current version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: 🔎 Determine version bump type
+        id: bump_type
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          if [[ "$COMMIT_MSG" =~ "release (major):" ]]; then
+            echo "type=major" >> $GITHUB_OUTPUT
+          elif [[ "$COMMIT_MSG" =~ "release (minor):" ]]; then
+            echo "type=minor" >> $GITHUB_OUTPUT
+          else
+            echo "type=patch" >> $GITHUB_OUTPUT
+          fi
+
+      - name: ⬆️ Bump version
+        id: bump_version
+        run: |
+          CURRENT_VERSION=${{ steps.current_version.outputs.version }}
+          IFS='.' read -r -a VERSION_PARTS <<< "$CURRENT_VERSION"
+          MAJOR="${VERSION_PARTS[0]}"
+          MINOR="${VERSION_PARTS[1]}"
+          PATCH="${VERSION_PARTS[2]}"
+
+          case "${{ steps.bump_type.outputs.type }}" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+          # Update version in plugin file
+          sed -i "s/Version: .*/Version: $NEW_VERSION/" dummy-content-generator.php
+          sed -i "s/define('DCG_VERSION'.*/define('DCG_VERSION', '$NEW_VERSION');/" dummy-content-generator.php
+
+      - name: 💾 Commit version bump
+        run: |
+          git add dummy-content-generator.php
+          git config --global user.email "${{secrets.EMAIL}}"
+          git config --global user.name "${{secrets.USERNAME}}"
+          git commit -m "Bump version to ${{ steps.bump_version.outputs.new_version }}"
+          git push "https://${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:master
+
+      - name: 🏷️ Create and push tag
+        run: |
+          git tag "v${{ steps.bump_version.outputs.new_version }}"
+          git push "https://${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }}.git" "v${{ steps.bump_version.outputs.new_version }}"
