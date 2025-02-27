@@ -72,6 +72,10 @@ class DCG_CLI {
       return;
     }
 
+    // Get the dummy user ID
+    $dummy_user = get_user_by('login', 'dcg_dummy_user');
+    $dummy_user_id = $dummy_user ? $dummy_user->ID : get_current_user_id();
+
     // Create admin instance for content generation
     $admin = new DCG_Admin();
     $generated = 0;
@@ -86,7 +90,7 @@ class DCG_CLI {
         'post_content' => $admin->generate_content_text(true, $use_images),
         'post_status' => 'publish',
         'post_type' => $post_type,
-        'post_author' => get_current_user_id()
+        'post_author' => $dummy_user_id
       );
 
       $post_id = wp_insert_post($post_data);
