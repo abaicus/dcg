@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Dummy Content Generator
  * Description: Generate dummy content for your WordPress site with customizable options.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: Your Name
  * License: GLWTPL
  * License URI: https://github.com/me-shaon/GLWTPL/blob/master/LICENSE
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('DCG_VERSION', '1.0.0');
+define('DCG_VERSION', '1.0.1');
 define('DCG_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('DCG_PLUGIN_URL', plugin_dir_url(__FILE__));
 
