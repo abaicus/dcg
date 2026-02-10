@@ -30,6 +30,13 @@
     margin-right: 8px;
 }
 
+.dcg-form-group .description {
+    margin-top: 5px;
+    color: #666;
+    font-style: italic;
+    font-size: 12px;
+}
+
 .dcg-delete-section {
     max-width: 600px;
     margin: 40px 0;
@@ -57,38 +64,79 @@
 }
 
 #dcg-progress {
-    margin: 20px 0;
-    padding: 15px;
-    background: #f8f8f8;
-    border-left: 4px solid #2271b1;
-}
-
-.progress-bar {
-    height: 20px;
-    background-color: #f1f1f1;
-    border-radius: 10px;
-    overflow: hidden;
-    margin-top: 10px;
-}
-
-.progress-bar::after {
-    content: '';
-    display: block;
-    height: 100%;
-    width: 0;
-    background-color: #2271b1;
-    animation: progress 2s infinite linear;
-}
-
-@keyframes progress {
-    0% { width: 0; }
-    100% { width: 100%; }
-}
-
-#dcg-results {
+    max-width: 600px;
     margin: 20px 0;
     padding: 15px;
     background: #fff;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    border-left: 4px solid #2271b1;
+}
+
+.progress-text {
+    margin: 0 0 10px 0;
+    font-weight: 500;
+    color: #1d2327;
+}
+
+.progress-bar {
+    height: 24px;
+    background-color: #f0f0f1;
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, #2271b1 0%, #135e96 100%);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+    position: relative;
+}
+
+.progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255,255,255,0.2) 50%,
+        transparent 100%
+    );
+    animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+#dcg-results {
+    max-width: 600px;
+    margin: 20px 0;
+    padding: 15px;
+    background: #fff;
+    border-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     border-left: 4px solid #46b450;
     display: none;
-} 
+}
+
+#dcg-results p {
+    margin: 0 0 10px 0;
+}
+
+#dcg-results p:last-child {
+    margin-bottom: 0;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
