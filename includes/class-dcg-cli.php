@@ -14,31 +14,28 @@ if (!defined('WP_CLI')) {
  */
 class DCG_CLI {
   /**
-   * Generates dummy content posts
-   * 
+   * Generates dummy content posts with Gutenberg blocks
+   *
    * ## OPTIONS
-   * 
+   *
    * [--count=<number>]
    * : Number of posts to generate
    * ---
    * default: 25
    * ---
-   * 
+   *
    * [--post-type=<type>]
    * : Post type to generate
    * ---
    * default: post
    * ---
-   * 
-   * [--images=<bool>]
-   * : Whether to include images in content
+   *
+   * [--image-count=<number>]
+   * : Number of images to include in content (0-10). Images are imported to Media Library.
    * ---
-   * default: true
-   * options:
-   *   - true
-   *   - false
+   * default: 3
    * ---
-   * 
+   *
    * [--featured-image=<bool>]
    * : Whether to add featured images
    * ---
@@ -47,15 +44,27 @@ class DCG_CLI {
    *   - true
    *   - false
    * ---
-   * 
+   *
+   * [--categories=<bool>]
+   * : Whether to generate and assign categories (only for post types that support categories)
+   * ---
+   * default: true
+   * options:
+   *   - true
+   *   - false
+   * ---
+   *
    * ## EXAMPLES
-   * 
-   *     # Generate 25 posts with images (default)
+   *
+   *     # Generate 25 posts with 3 content images each (default)
    *     $ wp dcg generate
-   * 
-   *     # Generate 5 pages without images
-   *     $ wp dcg generate --count=5 --post-type=page --images=false --featured-image=false
-   * 
+   *
+   *     # Generate 5 pages with 5 images each
+   *     $ wp dcg generate --count=5 --post-type=page --image-count=5
+   *
+   *     # Generate posts without any images or categories
+   *     $ wp dcg generate --image-count=0 --featured-image=false --categories=false
+   *
    * @param array $args
    * @param array $assoc_args
    */
@@ -63,8 +72,9 @@ class DCG_CLI {
     // Parse arguments with defaults
     $count = (int) ($assoc_args['count'] ?? 25);
     $post_type = $assoc_args['post-type'] ?? 'post';
-    $use_images = $this->parse_bool($assoc_args['images'] ?? 'true');
+    $image_count = min(10, max(0, (int) ($assoc_args['image-count'] ?? 3)));
     $use_featured = $this->parse_bool($assoc_args['featured-image'] ?? 'true');
+    $use_categories = $this->parse_bool($assoc_args['categories'] ?? 'true');
 
     // Validate post type
     if (!post_type_exists($post_type)) {
@@ -77,13 +87,22 @@ class DCG_CLI {
     $generated = 0;
     $failed = 0;
 
-    \WP_CLI::log(sprintf('Generating %d %s(s)...', $count, $post_type));
+    // Pre-generate categories if requested and post type supports them
+    $category_ids = array();
+    if ($use_categories && is_object_in_taxonomy($post_type, 'category')) {
+      \WP_CLI::log('Creating categories...');
+      $category_ids = $admin->get_or_create_categories();
+      \WP_CLI::log(sprintf('Using %d categories.', count($category_ids)));
+    }
+
+    \WP_CLI::log(sprintf('Generating %d %s(s) with %d content image(s) each...', $count, $post_type, $image_count));
     $progress = \WP_CLI\Utils\make_progress_bar('Generating content', $count);
 
     for ($i = 0; $i < $count; $i++) {
+      // Create post first to get ID for image attachment
       $post_data = array(
         'post_title' => $admin->generate_title(),
-        'post_content' => $admin->generate_content_text(true, $use_images),
+        'post_content' => '',
         'post_status' => 'publish',
         'post_type' => $post_type,
         'post_author' => get_current_user_id()
@@ -94,9 +113,31 @@ class DCG_CLI {
       if ($post_id && !is_wp_error($post_id)) {
         update_post_meta($post_id, '_dcg_generated', true);
 
+        // Generate content with post_id so images can be attached
+        $content = $admin->generate_content_text(true, $post_id, $image_count);
+        wp_update_post(array(
+          'ID' => $post_id,
+          'post_content' => $content
+        ));
+
         if ($use_featured) {
           $admin->add_random_image($post_id);
         }
+
+        // Assign random categories
+        if (!empty($category_ids)) {
+          $num_cats = rand(1, min(3, count($category_ids)));
+          $random_keys = array_rand($category_ids, $num_cats);
+          if (!is_array($random_keys)) {
+            $random_keys = array($random_keys);
+          }
+          $selected = array();
+          foreach ($random_keys as $key) {
+            $selected[] = $category_ids[$key];
+          }
+          wp_set_post_categories($post_id, $selected);
+        }
+
         $generated++;
       } else {
         $failed++;
@@ -115,13 +156,13 @@ class DCG_CLI {
   }
 
   /**
-   * Deletes all generated dummy content
-   * 
+   * Deletes all generated dummy content, images, and categories
+   *
    * ## EXAMPLES
-   * 
+   *
    *     # Delete all generated content
    *     $ wp dcg delete
-   * 
+   *
    */
   public function delete() {
     $args = array(
@@ -133,6 +174,7 @@ class DCG_CLI {
 
     $query = new WP_Query($args);
     $deleted = 0;
+    $attachments_deleted = 0;
 
     if ($query->have_posts()) {
       \WP_CLI::log(sprintf('Found %d posts to delete...', $query->found_posts));
@@ -146,6 +188,21 @@ class DCG_CLI {
         $featured_image_id = get_post_thumbnail_id($post_id);
         if ($featured_image_id) {
           wp_delete_attachment($featured_image_id, true);
+          $attachments_deleted++;
+        }
+
+        // Delete all attached content images (marked with our meta)
+        $attached_images = get_posts(array(
+          'post_type' => 'attachment',
+          'posts_per_page' => -1,
+          'post_parent' => $post_id,
+          'meta_key' => '_dcg_generated_attachment',
+          'meta_value' => true,
+        ));
+
+        foreach ($attached_images as $image) {
+          wp_delete_attachment($image->ID, true);
+          $attachments_deleted++;
         }
 
         // Delete the post
@@ -159,10 +216,14 @@ class DCG_CLI {
 
     wp_reset_postdata();
 
-    if ($deleted === 0) {
+    // Delete generated categories
+    $admin = new DCG_Admin();
+    $categories_deleted = $admin->delete_generated_categories();
+
+    if ($deleted === 0 && $categories_deleted === 0) {
       \WP_CLI::log('No generated content found to delete.');
     } else {
-      \WP_CLI::success(sprintf('Deleted %d generated posts.', $deleted));
+      \WP_CLI::success(sprintf('Deleted %d posts, %d attachments, and %d categories.', $deleted, $attachments_deleted, $categories_deleted));
     }
   }
 

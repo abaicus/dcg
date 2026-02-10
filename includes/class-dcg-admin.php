@@ -5,6 +5,7 @@ class DCG_Admin {
     add_action('admin_menu', array($this, 'add_admin_menu'));
     add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
     add_action('wp_ajax_dcg_generate_content', array($this, 'generate_content'));
+    add_action('wp_ajax_dcg_generate_batch', array($this, 'generate_batch'));
     add_action('wp_ajax_dcg_delete_content', array($this, 'delete_content'));
     add_action('init', array($this, 'add_post_meta_flag'));
   }
@@ -63,7 +64,8 @@ class DCG_Admin {
 
         <div class="dcg-form-group">
           <label for="post_count">Number of Posts:</label>
-          <input type="number" name="post_count" id="post_count" min="1" max="50" value="25" required>
+          <input type="number" name="post_count" id="post_count" min="1" value="25" required>
+          <p class="description">Posts are generated in batches to prevent timeouts.</p>
         </div>
 
         <div class="dcg-form-group">
@@ -81,10 +83,17 @@ class DCG_Admin {
         </div>
 
         <div class="dcg-form-group">
+          <label for="content_image_count">Images in content:</label>
+          <input type="number" name="content_image_count" id="content_image_count" min="0" max="10" value="3">
+          <p class="description">Number of images to embed in content (0-10). Images will be imported to the Media Library.</p>
+        </div>
+
+        <div class="dcg-form-group">
           <label>
-            <input type="checkbox" name="content_images" id="content_images" checked>
-            Add images in content (max 3)
+            <input type="checkbox" name="generate_categories" id="generate_categories" checked>
+            Generate and assign categories
           </label>
+          <p class="description">Creates dummy categories and assigns 1-3 to each post. Only applies to post types that support categories.</p>
         </div>
 
         <button type="submit" class="button button-primary">Generate Content</button>
@@ -100,8 +109,10 @@ class DCG_Admin {
       </div>
 
       <div id="dcg-progress" style="display: none;">
-        <p>Processing... Please wait.</p>
-        <div class="progress-bar"></div>
+        <p class="progress-text">Starting...</p>
+        <div class="progress-bar">
+          <div class="progress-bar-fill"></div>
+        </div>
       </div>
       <div id="dcg-results"></div>
     </div>
@@ -119,14 +130,23 @@ class DCG_Admin {
     $post_count = intval($_POST['post_count']);
     $include_html = isset($_POST['include_html']) ? true : false;
     $featured_image = isset($_POST['featured_image']) ? true : false;
-    $content_images = isset($_POST['content_images']) ? true : false;
+    $content_image_count = isset($_POST['content_image_count']) ? intval($_POST['content_image_count']) : 0;
+    $content_image_count = max(0, min(10, $content_image_count)); // Clamp to 0-10
+    $generate_categories = isset($_POST['generate_categories']) ? true : false;
+
+    // Pre-generate categories if requested and post type supports them
+    $category_ids = array();
+    if ($generate_categories && is_object_in_taxonomy($post_type, 'category')) {
+      $category_ids = $this->get_or_create_categories();
+    }
 
     $generated_posts = array();
 
     for ($i = 0; $i < $post_count; $i++) {
+      // Create post first to get ID for image attachment
       $post_data = array(
         'post_title' => $this->generate_title(),
-        'post_content' => $this->generate_content_text($include_html, $content_images),
+        'post_content' => '',
         'post_status' => 'publish',
         'post_type' => $post_type,
         'post_author' => get_current_user_id()
@@ -137,9 +157,24 @@ class DCG_Admin {
       if ($post_id && !is_wp_error($post_id)) {
         update_post_meta($post_id, '_dcg_generated', true);
 
+        // Generate content with post_id so images can be attached
+        $content = $this->generate_content_text($include_html, $post_id, $content_image_count);
+
+        // Update the post with generated content
+        wp_update_post(array(
+          'ID' => $post_id,
+          'post_content' => $content
+        ));
+
         if ($featured_image) {
           $this->add_random_image($post_id);
         }
+
+        // Assign random categories
+        if (!empty($category_ids)) {
+          $this->assign_random_categories($post_id, $category_ids);
+        }
+
         $generated_posts[] = $post_id;
       }
     }
@@ -148,6 +183,150 @@ class DCG_Admin {
       'message' => sprintf('Successfully generated %d posts', count($generated_posts)),
       'posts' => $generated_posts
     ));
+  }
+
+  /**
+   * Generate a batch of posts via AJAX
+   * This endpoint generates posts in small batches to prevent timeouts
+   */
+  public function generate_batch() {
+    check_ajax_referer('dcg_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+      wp_send_json_error('Unauthorized access');
+    }
+
+    $post_type = sanitize_text_field($_POST['post_type']);
+    $batch_size = intval($_POST['batch_size']);
+    $batch_index = intval($_POST['batch_index']);
+    $include_html = isset($_POST['include_html']) && $_POST['include_html'] === 'true';
+    $featured_image = isset($_POST['featured_image']) && $_POST['featured_image'] === 'true';
+    $content_image_count = isset($_POST['content_image_count']) ? intval($_POST['content_image_count']) : 0;
+    $content_image_count = max(0, min(10, $content_image_count));
+    $generate_categories = isset($_POST['generate_categories']) && $_POST['generate_categories'] === 'true';
+
+    // Get or create categories if needed (only on first batch)
+    $category_ids = array();
+    if ($generate_categories && is_object_in_taxonomy($post_type, 'category')) {
+      $category_ids = $this->get_or_create_categories();
+    }
+
+    $generated_posts = array();
+
+    for ($i = 0; $i < $batch_size; $i++) {
+      $post_data = array(
+        'post_title' => $this->generate_title(),
+        'post_content' => '',
+        'post_status' => 'publish',
+        'post_type' => $post_type,
+        'post_author' => get_current_user_id()
+      );
+
+      $post_id = wp_insert_post($post_data);
+
+      if ($post_id && !is_wp_error($post_id)) {
+        update_post_meta($post_id, '_dcg_generated', true);
+
+        $content = $this->generate_content_text($include_html, $post_id, $content_image_count);
+
+        wp_update_post(array(
+          'ID' => $post_id,
+          'post_content' => $content
+        ));
+
+        if ($featured_image) {
+          $this->add_random_image($post_id);
+        }
+
+        if (!empty($category_ids)) {
+          $this->assign_random_categories($post_id, $category_ids);
+        }
+
+        $generated_posts[] = $post_id;
+      }
+    }
+
+    wp_send_json_success(array(
+      'batch_index' => $batch_index,
+      'generated' => count($generated_posts),
+      'posts' => $generated_posts
+    ));
+  }
+
+  /**
+   * Get or create dummy categories
+   *
+   * @return array Array of category IDs
+   */
+  public function get_or_create_categories() {
+    $category_names = array(
+      'Technology',
+      'Business',
+      'Lifestyle',
+      'Health & Wellness',
+      'Travel',
+      'Food & Recipes',
+      'Entertainment',
+      'Science',
+      'Education',
+      'Sports'
+    );
+
+    $category_ids = array();
+
+    foreach ($category_names as $name) {
+      $slug = sanitize_title($name);
+
+      // Check if category already exists
+      $term = get_term_by('slug', $slug, 'category');
+
+      if ($term) {
+        // Check if it's a DCG-generated category
+        $is_dcg = get_term_meta($term->term_id, '_dcg_generated_category', true);
+        if ($is_dcg) {
+          $category_ids[] = $term->term_id;
+        }
+      } else {
+        // Create new category
+        $result = wp_insert_term($name, 'category', array('slug' => $slug));
+
+        if (!is_wp_error($result)) {
+          $term_id = $result['term_id'];
+          // Mark as DCG-generated for cleanup
+          update_term_meta($term_id, '_dcg_generated_category', true);
+          $category_ids[] = $term_id;
+        }
+      }
+    }
+
+    return $category_ids;
+  }
+
+  /**
+   * Assign random categories to a post
+   *
+   * @param int $post_id The post ID
+   * @param array $category_ids Available category IDs
+   */
+  private function assign_random_categories($post_id, $category_ids) {
+    if (empty($category_ids)) {
+      return;
+    }
+
+    // Assign 1-3 random categories
+    $num_categories = rand(1, min(3, count($category_ids)));
+    $random_keys = array_rand($category_ids, $num_categories);
+
+    if (!is_array($random_keys)) {
+      $random_keys = array($random_keys);
+    }
+
+    $selected_categories = array();
+    foreach ($random_keys as $key) {
+      $selected_categories[] = $category_ids[$key];
+    }
+
+    wp_set_post_categories($post_id, $selected_categories);
   }
 
   public function generate_title() {
@@ -173,7 +352,127 @@ class DCG_Admin {
     return implode(' ', array_slice($words, 0, rand(2, 4)));
   }
 
-  public function generate_content_text($include_html = false, $include_images = false) {
+  /**
+   * Generate a Gutenberg paragraph block
+   *
+   * @param string $text The paragraph text
+   * @param bool $has_emphasis Whether to add emphasis (strong) tags
+   * @return string Gutenberg block markup
+   */
+  private function generate_paragraph_block($text, $has_emphasis = false) {
+    if ($has_emphasis) {
+      $words = explode(' ', $text);
+      if (count($words) >= 3) {
+        $random_start = rand(0, count($words) - 3);
+        $words[$random_start] = '<strong>' . $words[$random_start];
+        $words[$random_start + 2] = $words[$random_start + 2] . '</strong>';
+        $text = implode(' ', $words);
+      }
+    }
+
+    return sprintf(
+      "<!-- wp:paragraph -->\n<p>%s</p>\n<!-- /wp:paragraph -->\n\n",
+      $text
+    );
+  }
+
+  /**
+   * Generate a Gutenberg heading block
+   *
+   * @param string $text The heading text
+   * @param int $level Heading level (2-4)
+   * @return string Gutenberg block markup
+   */
+  private function generate_heading_block($text, $level = 2) {
+    return sprintf(
+      "<!-- wp:heading {\"level\":%d} -->\n<h%d class=\"wp-block-heading\">%s</h%d>\n<!-- /wp:heading -->\n\n",
+      $level,
+      $level,
+      $text,
+      $level
+    );
+  }
+
+  /**
+   * Generate a Gutenberg list block
+   *
+   * @param array $items List items
+   * @param bool $ordered Whether to create an ordered list
+   * @return string Gutenberg block markup
+   */
+  private function generate_list_block($items, $ordered = false) {
+    $tag = $ordered ? 'ol' : 'ul';
+    $attrs = $ordered ? ' {"ordered":true}' : '';
+
+    $list_items_html = '';
+    foreach ($items as $item) {
+      $list_items_html .= sprintf(
+        "<!-- wp:list-item -->\n<li>%s</li>\n<!-- /wp:list-item -->\n",
+        $item
+      );
+    }
+
+    return sprintf(
+      "<!-- wp:list%s -->\n<%s class=\"wp-block-list\">\n%s</%s>\n<!-- /wp:list -->\n\n",
+      $attrs,
+      $tag,
+      $list_items_html,
+      $tag
+    );
+  }
+
+  /**
+   * Generate a Gutenberg quote block
+   *
+   * @param string $text The quote text
+   * @return string Gutenberg block markup
+   */
+  private function generate_quote_block($text) {
+    return sprintf(
+      "<!-- wp:quote -->\n<blockquote class=\"wp-block-quote\"><!-- wp:paragraph -->\n<p>%s</p>\n<!-- /wp:paragraph --></blockquote>\n<!-- /wp:quote -->\n\n",
+      $text
+    );
+  }
+
+  /**
+   * Generate a Gutenberg image block
+   *
+   * @param int $attachment_id The attachment ID
+   * @return string Gutenberg block markup
+   */
+  private function generate_image_block($attachment_id) {
+    if (!$attachment_id) {
+      return '';
+    }
+
+    $image_url = wp_get_attachment_image_url($attachment_id, 'large');
+    if (!$image_url) {
+      $image_url = wp_get_attachment_url($attachment_id);
+    }
+
+    $attrs = wp_json_encode(array(
+      'id' => $attachment_id,
+      'sizeSlug' => 'large',
+      'linkDestination' => 'none'
+    ));
+
+    return sprintf(
+      "<!-- wp:image %s -->\n<figure class=\"wp-block-image size-large\"><img src=\"%s\" alt=\"\" class=\"wp-image-%d\"/></figure>\n<!-- /wp:image -->\n\n",
+      $attrs,
+      esc_url($image_url),
+      $attachment_id
+    );
+  }
+
+  /**
+   * Generate post content with Gutenberg blocks
+   *
+   * @param bool $include_html Whether to include HTML/Gutenberg blocks
+   * @param int|null $post_id Post ID for attaching images
+   * @param int $content_image_count Number of images to include in content
+   * @return string Generated content
+   */
+  public function generate_content_text($include_html = false, $post_id = null, $content_image_count = 0) {
     $paragraphs = array(
       'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',
       'Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.',
@@ -209,52 +508,78 @@ class DCG_Admin {
     $content = '';
     $num_sections = rand(4, 8);
 
+    // Pre-import content images if requested
+    $imported_images = array();
+    if ($include_html && $post_id && $content_image_count > 0) {
+      $sizes = array(
+        array(640, 480),   // 4:3
+        array(800, 533),   // 3:2
+        array(600, 600),   // 1:1
+        array(480, 640),   // 3:4 (portrait)
+        array(800, 450),   // 16:9
+      );
+
+      for ($img = 0; $img < $content_image_count; $img++) {
+        $size = $sizes[array_rand($sizes)];
+        $attach_id = $this->import_random_image($post_id, $size[0], $size[1], false);
+        if ($attach_id) {
+          $imported_images[] = $attach_id;
+        }
+      }
+    }
+
+    // Calculate image insertion points (distribute evenly)
+    $image_insert_points = array();
+    if (count($imported_images) > 0 && $num_sections > 1) {
+      $interval = max(1, floor($num_sections / (count($imported_images) + 1)));
+      for ($i = 0; $i < count($imported_images); $i++) {
+        $image_insert_points[($i + 1) * $interval] = $imported_images[$i];
+      }
+    }
+
     for ($i = 0; $i < $num_sections; $i++) {
       $element_type = rand(1, 5);
 
       if ($include_html) {
+        // Generate Gutenberg blocks
         switch ($element_type) {
           case 1: // Heading
             $heading_level = rand(2, 4);
-            $content .= sprintf(
-              '<h%d>%s</h%d>',
-              $heading_level,
+            $content .= $this->generate_heading_block(
               $headings[array_rand($headings)],
               $heading_level
             );
             break;
 
           case 2: // Paragraph
-            $content .= '<p>' . $paragraphs[array_rand($paragraphs)] . '</p>';
+            $content .= $this->generate_paragraph_block(
+              $paragraphs[array_rand($paragraphs)]
+            );
             break;
 
           case 3: // List
-            $list_type = rand(0, 1) ? 'ul' : 'ol';
+            $ordered = (bool) rand(0, 1);
             $list_items = $lists[array_rand($lists)];
-            $content .= "<{$list_type}>";
-            foreach ($list_items as $item) {
-              $content .= "<li>{$item}</li>";
-            }
-            $content .= "</{$list_type}>";
+            $content .= $this->generate_list_block($list_items, $ordered);
             break;
 
           case 4: // Blockquote
-            $content .= '<blockquote>' . $blockquotes[array_rand($blockquotes)] . '</blockquote>';
+            $content .= $this->generate_quote_block(
+              $blockquotes[array_rand($blockquotes)]
+            );
             break;
 
-          case 5: // Paragraph with strong/em
-            $p = $paragraphs[array_rand($paragraphs)];
-            $words = explode(' ', $p);
-            $random_start = rand(0, count($words) - 3);
-            $words[$random_start] = '<strong>' . $words[$random_start];
-            $words[$random_start + 2] = $words[$random_start + 2] . '</strong>';
-            $content .= '<p>' . implode(' ', $words) . '</p>';
+          case 5: // Paragraph with emphasis
+            $content .= $this->generate_paragraph_block(
+              $paragraphs[array_rand($paragraphs)],
+              true
+            );
             break;
         }
 
-        // Add images with varying frequency and sizes
-        if ($include_images && $i < 3 && rand(0, 2) === 1) {
-          $content .= $this->get_random_image_html();
+        // Insert image at designated points
+        if (isset($image_insert_points[$i])) {
+          $content .= $this->generate_image_block($image_insert_points[$i]);
         }
       } else {
         // Plain text version
@@ -277,54 +602,115 @@ class DCG_Admin {
             $content .= "> " . $blockquotes[array_rand($blockquotes)] . "\n\n";
             break;
         }
-
-        if ($include_images && $i < 3 && rand(0, 2) === 1) {
-          $content .= $this->get_random_image_html() . "\n\n";
-        }
       }
     }
 
     return $content;
   }
 
-  public function get_random_image_html() {
-    // Different aspect ratios and sizes
-    $sizes = array(
-      array(800, 600),  // 4:3
-      array(1200, 800), // 3:2
-      array(1000, 1000), // 1:1
-      array(900, 1200),  // 3:4 (portrait)
-      array(1920, 1080), // 16:9
-    );
+  /**
+   * Generate a placeholder image locally using GD
+   * Much faster than downloading from external services
+   *
+   * @param int $width Image width
+   * @param int $height Image height
+   * @return string|false Image data on success, false on failure
+   */
+  private function generate_placeholder_image($width, $height) {
+    if (!function_exists('imagecreatetruecolor')) {
+      return false;
+    }
 
-    $size = $sizes[array_rand($sizes)];
-    $width = $size[0];
-    $height = $size[1];
+    $image = imagecreatetruecolor($width, $height);
+    if (!$image) {
+      return false;
+    }
 
-    // Add a random seed to ensure different images
-    $seed = rand(1, 1000);
-    return sprintf(
-      '<img src="https://picsum.photos/seed/%d/%d/%d" alt="Random image" style="max-width: 100%%; height: auto;" />',
-      $seed,
-      $width,
-      $height
-    );
+    // Generate random pastel/muted colors for a professional look
+    $hue = rand(0, 360);
+    $rgb = $this->hsl_to_rgb($hue, 0.4, 0.7);
+    $bg_color = imagecolorallocate($image, $rgb[0], $rgb[1], $rgb[2]);
+    imagefill($image, 0, 0, $bg_color);
+
+    // Add a subtle gradient overlay (alpha: 0=opaque, 127=transparent)
+    $darker_rgb = $this->hsl_to_rgb($hue, 0.5, 0.5);
+
+    for ($y = 0; $y < $height; $y++) {
+      $alpha = (int)(($y / $height) * 40) + 80; // Range: 80-120
+      $line_color = imagecolorallocatealpha($image, $darker_rgb[0], $darker_rgb[1], $darker_rgb[2], $alpha);
+      imageline($image, 0, $y, $width, $y, $line_color);
+    }
+
+    // Add geometric shapes for visual interest
+    $shape_color = imagecolorallocatealpha($image, 255, 255, 255, 90);
+    $num_shapes = rand(2, 4);
+    for ($i = 0; $i < $num_shapes; $i++) {
+      $shape_type = rand(0, 1);
+      $x = rand(0, $width);
+      $y = rand(0, $height);
+      $size = rand((int)($width * 0.1), (int)($width * 0.3));
+
+      if ($shape_type === 0) {
+        imagefilledellipse($image, $x, $y, $size, $size, $shape_color);
+      } else {
+        imagefilledrectangle($image, $x, $y, $x + $size, $y + (int)($size * 0.6), $shape_color);
+      }
+    }
+
+    // Capture output
+    ob_start();
+    imagejpeg($image, null, 85);
+    $image_data = ob_get_clean();
+    imagedestroy($image);
+
+    return $image_data;
   }
 
-  public function add_random_image($post_id) {
-    // Use 16:9 aspect ratio for featured images
-    $width = 1920;
-    $height = 1080;
-    $seed = rand(1, 1000);
-    $image_url = sprintf('https://picsum.photos/seed/%d/%d/%d', $seed, $width, $height);
+  /**
+   * Convert HSL to RGB
+   */
+  private function hsl_to_rgb($h, $s, $l) {
+    $h = $h / 360;
 
-    $upload_dir = wp_upload_dir();
-    $image_data = file_get_contents($image_url);
+    if ($s == 0) {
+      $r = $g = $b = $l * 255;
+    } else {
+      $q = $l < 0.5 ? $l * (1 + $s) : $l + $s - $l * $s;
+      $p = 2 * $l - $q;
+      $r = $this->hue_to_rgb($p, $q, $h + 1/3) * 255;
+      $g = $this->hue_to_rgb($p, $q, $h) * 255;
+      $b = $this->hue_to_rgb($p, $q, $h - 1/3) * 255;
+    }
+
+    return array((int)$r, (int)$g, (int)$b);
+  }
+
+  private function hue_to_rgb($p, $q, $t) {
+    if ($t < 0) $t += 1;
+    if ($t > 1) $t -= 1;
+    if ($t < 1/6) return $p + ($q - $p) * 6 * $t;
+    if ($t < 1/2) return $q;
+    if ($t < 2/3) return $p + ($q - $p) * (2/3 - $t) * 6;
+    return $p;
+  }
+
+  /**
+   * Create a placeholder image and add to Media Library
+   *
+   * @param int $post_id The post ID to attach the image to
+   * @param int $width Image width
+   * @param int $height Image height
+   * @param bool $generate_thumbnails Whether to generate thumbnail sizes
+   * @return int|false Attachment ID on success, false on failure
+   */
+  public function import_random_image($post_id, $width = 1200, $height = 800, $generate_thumbnails = true) {
+    $image_data = $this->generate_placeholder_image($width, $height);
 
     if ($image_data === false) {
       return false;
     }
 
+    $upload_dir = wp_upload_dir();
     $filename = 'dcg-' . uniqid() . '.jpg';
     $file = $upload_dir['path'] . '/' . $filename;
 
@@ -336,15 +722,45 @@ class DCG_Admin {
       'post_mime_type' => $wp_filetype['type'],
       'post_title' => sanitize_file_name($filename),
       'post_content' => '',
-      'post_status' => 'inherit'
+      'post_status' => 'inherit',
+      'post_parent' => $post_id
     );
 
     $attach_id = wp_insert_attachment($attachment, $file, $post_id);
 
     if ($attach_id) {
-      require_once(ABSPATH . 'wp-admin/includes/image.php');
-      $attach_data = wp_generate_attachment_metadata($attach_id, $file);
-      wp_update_attachment_metadata($attach_id, $attach_data);
+      // Only generate thumbnails for featured images (significant speed boost)
+      if ($generate_thumbnails) {
+        require_once(ABSPATH . 'wp-admin/includes/image.php');
+        $attach_data = wp_generate_attachment_metadata($attach_id, $file);
+        wp_update_attachment_metadata($attach_id, $attach_data);
+      } else {
+        // Minimal metadata for content images
+        wp_update_attachment_metadata($attach_id, array(
+          'width' => $width,
+          'height' => $height,
+          'file' => $upload_dir['subdir'] . '/' . $filename,
+        ));
+      }
+
+      // Mark as DCG-generated for cleanup
+      update_post_meta($attach_id, '_dcg_generated_attachment', true);
+    }
+
+    return $attach_id;
+  }
+
+  /**
+   * Add a random featured image to a post
+   *
+   * @param int $post_id The post ID
+   * @return int|false Attachment ID on success, false on failure
+   */
+  public function add_random_image($post_id) {
+    // Use 16:9 aspect ratio for featured images, generate thumbnails
+    $attach_id = $this->import_random_image($post_id, 1200, 675, true);
+
+    if ($attach_id) {
       set_post_thumbnail($post_id, $attach_id);
     }
 
@@ -373,10 +789,23 @@ class DCG_Admin {
         $query->the_post();
         $post_id = get_the_ID();
 
-        // Delete featured image and any inline images
+        // Delete featured image
         $featured_image_id = get_post_thumbnail_id($post_id);
         if ($featured_image_id) {
           wp_delete_attachment($featured_image_id, true);
+        }
+
+        // Delete all attached content images (marked with our meta)
+        $attached_images = get_posts(array(
+          'post_type' => 'attachment',
+          'posts_per_page' => -1,
+          'post_parent' => $post_id,
+          'meta_key' => '_dcg_generated_attachment',
+          'meta_value' => true,
+        ));
+
+        foreach ($attached_images as $image) {
+          wp_delete_attachment($image->ID, true);
         }
 
         // Delete the post
@@ -387,9 +816,41 @@ class DCG_Admin {
 
     wp_reset_postdata();
 
+    // Delete generated categories
+    $categories_deleted = $this->delete_generated_categories();
+
     wp_send_json_success(array(
-      'message' => sprintf('Successfully deleted %d items', $deleted_count),
-      'count' => $deleted_count
+      'message' => sprintf('Successfully deleted %d posts and %d categories', $deleted_count, $categories_deleted),
+      'count' => $deleted_count,
+      'categories_deleted' => $categories_deleted
     ));
+  }
+
+  /**
+   * Delete all DCG-generated categories
+   *
+   * @return int Number of categories deleted
+   */
+  public function delete_generated_categories() {
+    $deleted = 0;
+
+    // Get all categories with our meta flag
+    $terms = get_terms(array(
+      'taxonomy' => 'category',
+      'hide_empty' => false,
+      'meta_key' => '_dcg_generated_category',
+      'meta_value' => true,
+    ));
+
+    if (!is_wp_error($terms)) {
+      foreach ($terms as $term) {
+        $result = wp_delete_term($term->term_id, 'category');
+        if (!is_wp_error($result) && $result !== false) {
+          $deleted++;
+        }
+      }
+    }
+
+    return $deleted;
   }
 }
