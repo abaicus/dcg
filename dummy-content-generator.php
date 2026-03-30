@@ -35,12 +35,25 @@ if (defined('WP_CLI') && WP_CLI) {
 
 // Activation hook
 function dcg_activate() {
-  // Activation tasks if needed
+  // Create a dummy user during plugin activation
+  $dummy_user = get_user_by('login', 'dcg_dummy_user');
+  if (!$dummy_user) {
+    $dummy_user_id = wp_create_user('dcg_dummy_user', wp_generate_password(), 'dcg_dummy_user@example.com');
+    wp_update_user(array(
+      'ID' => $dummy_user_id,
+      'role' => 'author',
+      'display_name' => 'Danny Creed Genobli'
+    ));
+  }
 }
 register_activation_hook(__FILE__, 'dcg_activate');
 
 // Deactivation hook
 function dcg_deactivate() {
-  // Cleanup tasks if needed
+  // Remove the dummy user during plugin deactivation
+  $dummy_user = get_user_by('login', 'dcg_dummy_user');
+  if ($dummy_user) {
+    wp_delete_user($dummy_user->ID);
+  }
 }
 register_deactivation_hook(__FILE__, 'dcg_deactivate');
